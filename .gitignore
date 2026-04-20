@@ -1,0 +1,7 @@
+*.exe
+*.obj
+*.dll
+*.png
+*.jpg
+key.json
+result.png
