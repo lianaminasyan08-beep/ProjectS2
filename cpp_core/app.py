@@ -18,7 +18,7 @@ mode = st.sidebar.selectbox(
 )
 
 # =========================
-# PATHS (STREAMLIT SAFE)
+# PATHS (IMPORTANT FIX)
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
@@ -45,7 +45,7 @@ def square_pad_and_resize(img, size=(40, 40)):
     return cv2.resize(padded, size)
 
 # =========================
-# IMPROVED THRESHOLD (IMPORTANT FIX)
+# THRESHOLD (FIXED FOR CLOUD)
 # =========================
 def preprocess(gray):
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -56,7 +56,7 @@ def preprocess(gray):
     return th
 
 # =========================
-# CHARACTER EXTRACTION (FIXED)
+# CHARACTER EXTRACTION
 # =========================
 def extract_characters(img, num_chars=7):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -77,7 +77,7 @@ def extract_characters(img, num_chars=7):
 
     boxes = sorted(boxes, key=lambda b: b[0])
 
-    # SAFE fallback (IMPORTANT FIX)
+    # fallback if detection fails
     h_img, w_img = th.shape
     if len(boxes) < num_chars:
         cw = max(1, w_img // num_chars)
@@ -112,6 +112,40 @@ def extract_contour_points(img, num_points=NUM_POINTS):
     return cnt[idx].astype(np.float64)
 
 # =========================
+# NORMALIZATION
+# =========================
+def normalize_points(pts):
+    pts = pts - np.mean(pts, axis=0)
+    norm = np.linalg.norm(pts)
+    return pts / norm if norm > 1e-9 else pts
+
+# =========================
+# LOAD TEMPLATES
+# =========================
+@st.cache_data
+def load_templates():
+    templates = {}
+
+    if not os.path.exists(TEMPLATE_DIR):
+        return templates
+
+    for f in os.listdir(TEMPLATE_DIR):
+        path = os.path.join(TEMPLATE_DIR, f)
+
+        img = cv2.imread(path, 0)
+        if img is None:
+            continue
+
+        img = cv2.resize(img, (40, 40))
+
+        pts = extract_contour_points(img)
+        pts = normalize_points(pts)
+
+        templates[f[0]] = pts
+
+    return templates
+
+# =========================
 # TEMPLATE GENERATION
 # =========================
 def generate_templates():
@@ -120,7 +154,7 @@ def generate_templates():
     chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
     if not os.path.exists(FONT_PATH):
-        st.error("FE-FONT.TTF missing in project root!")
+        st.error("FE-FONT.TTF not found in project root!")
         return
 
     font = ImageFont.truetype(FONT_PATH, 90)
@@ -151,9 +185,35 @@ def generate_templates():
     st.success("Templates generated!")
 
 # =========================
-# ENCODE FIX (MAIN FIX)
+# RECOGNITION
 # =========================
-if mode == "Encode Plate":
+def recognize(pts, templates):
+    pts = normalize_points(pts)
+
+    best, best_score = "?", float("inf")
+
+    for label, tpl in templates.items():
+        score = np.mean(np.linalg.norm(pts - tpl, axis=1))
+
+        if score < best_score:
+            best_score = score
+            best = label
+
+    return best
+
+# =========================
+# UI
+# =========================
+if mode == "Generate Templates":
+    st.title("Template Generator")
+
+    if st.button("Generate"):
+        generate_templates()
+
+# =========================
+# ENCODE (FIXED)
+# =========================
+elif mode == "Encode Plate":
     st.title("Encode Plate")
 
     file = st.file_uploader("Upload image")
@@ -170,15 +230,11 @@ if mode == "Encode Plate":
         for c in chars:
             pts = extract_contour_points(c)
 
-            # ignore empty junk
             if np.count_nonzero(pts) == 0:
                 continue
 
-            encoded.append({
-                "points": pts.tolist()
-            })
+            encoded.append({"points": pts.tolist()})
 
-        # IMPORTANT FIX: validation
         if len(encoded) == 0:
             st.error("No characters detected. Try a clearer image.")
         else:
@@ -186,17 +242,24 @@ if mode == "Encode Plate":
             st.code(json.dumps(encoded, indent=2))
 
 # =========================
-# TEMPLATE VIEW / DEBUG
-# =========================
-elif mode == "Generate Templates":
-    st.title("Template Generator")
-
-    if st.button("Generate Templates"):
-        generate_templates()
-
-# =========================
-# PLACEHOLDER
+# DECODE (FIXED)
 # =========================
 elif mode == "Decode & Recognize":
     st.title("Decode & Recognize")
-    st.info("Your recognition logic stays same (not modified here).")
+
+    text = st.text_area("Paste JSON here")
+
+    if st.button("Recognize"):
+        if not text.strip():
+            st.warning("Please paste JSON first")
+        else:
+            templates = load_templates()
+            data = json.loads(text)
+
+            result = ""
+
+            for item in data:
+                pts = np.array(item["points"])
+                result += recognize(pts, templates)
+
+            st.success(f"RESULT: {result}")
