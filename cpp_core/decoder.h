@@ -1,10 +1,4 @@
-#ifndef DECODER_H
-#define DECODER_H
-
+#pragma once
 #include <string>
 
-void decodeKey(std::string file,
-               std::string outImg,
-               std::string outTxt);
-
-#endif
+void decodeKey(const std::string& path);

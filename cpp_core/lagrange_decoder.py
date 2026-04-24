@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import json
 
 # ---------------- LAGRANGE ----------------
 def lagrange(x, y, xi):
@@ -11,43 +10,40 @@ def lagrange(x, y, xi):
         term = y[i]
         for j in range(n):
             if i != j:
-                term *= (xi - x[j]) / (x[i] - x[j])
+                denom = x[i] - x[j]
+                if abs(denom) < 1e-9:
+                    continue
+                term *= (xi - x[j]) / denom
         total += term
 
     return total
 
 
-# ---------------- DRAW ----------------
-def reconstruct_and_plot(key_data):
+# ---------------- PLOT ----------------
+def plot_points(pts):
+    pts = np.array(pts)
 
-    plt.figure(figsize=(8,3))
+    x = pts[:, 0]
+    y = pts[:, 1]
 
-    result_text = ""
+    # normalize for stability
+    x = (x - np.min(x)) / (np.max(x) - np.min(x) + 1e-9)
+    y = (y - np.min(y)) / (np.max(y) - np.min(y) + 1e-9)
 
-    offset = 0
+    xi = np.linspace(0, 1, 200)
+    yi = [lagrange(x, y, v) for v in xi]
 
-    for char in key_data:
-
-        pts = np.array(char["points"])
-        label = char.get("char", "?")
-
-        x = pts[:,0]
-        y = pts[:,1]
-
-        xi_vals = np.linspace(min(x), max(x), 200)
-        yi_vals = [lagrange(x, y, xi) for xi in xi_vals]
-
-        # shift characters horizontally
-        plt.plot(xi_vals + offset, yi_vals, linewidth=2)
-
-        offset += max(x) - min(x) + 20
-
-        result_text += label
-
+    plt.plot(xi, yi)
     plt.gca().invert_yaxis()
-    plt.title(result_text)
+    plt.axis("equal")
 
-    plt.savefig("result.png")
-    plt.close()
 
-    return result_text
+# ---------------- FIXED DECODER ----------------
+def decode(json_data):
+
+    # IMPORTANT FIX: json_data is LIST, not dict
+    for char in json_data:
+        pts = char["points"]
+        plot_points(pts)
+
+    plt.show()
