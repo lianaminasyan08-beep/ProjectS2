@@ -3,7 +3,7 @@ import json
 import cv2
 import numpy as np
 import streamlit as st
-import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageFont
 
 # =========================
 # CONFIG
@@ -16,7 +16,7 @@ mode = st.sidebar.selectbox(
 )
 
 # =========================
-# HELPERS
+# IMAGE HELPERS
 # =========================
 def square_pad_and_resize(img, size=(40, 40)):
     h, w = img.shape[:2]
@@ -36,6 +36,61 @@ def square_pad_and_resize(img, size=(40, 40)):
     return cv2.resize(padded, size)
 
 # =========================
+# TRUE LAGRANGE INTERPOLATION
+# =========================
+def lagrange_1d(t, y, t_new):
+    t = np.array(t, dtype=np.float64)
+    y = np.array(y, dtype=np.float64)
+
+    result = np.zeros_like(t_new, dtype=np.float64)
+    n = len(t)
+
+    for i in range(n):
+        Li = np.ones_like(t_new)
+
+        for j in range(n):
+            if i != j:
+                denom = (t[i] - t[j])
+                if abs(denom) < 1e-12:
+                    continue
+                Li *= (t_new - t[j]) / denom
+
+        result += y[i] * Li
+
+    return result
+
+
+def lagrange_smooth(pts, num_out=40):
+    pts = np.array(pts, dtype=np.float64)
+
+    if len(pts) < 4:
+        return pts
+
+    t = np.linspace(0, 1, len(pts))
+    t_new = np.linspace(0, 1, num_out)
+
+    x = pts[:, 0]
+    y = pts[:, 1]
+
+    x_new = lagrange_1d(t, x, t_new)
+    y_new = lagrange_1d(t, y, t_new)
+
+    return np.vstack([x_new, y_new]).T
+
+# =========================
+# CURVED CHARACTER DETECTION
+# =========================
+def is_curved(pts):
+    pts = np.array(pts)
+
+    diffs = np.diff(pts, axis=0)
+    angles = np.arctan2(diffs[:, 1], diffs[:, 0])
+
+    curvature = np.std(angles)
+
+    return curvature > 0.6
+
+# =========================
 # TEMPLATE GENERATION
 # =========================
 def generate_templates():
@@ -45,10 +100,8 @@ def generate_templates():
     font_path = os.path.join(os.getcwd(), "FE-FONT.TTF")
 
     if not os.path.exists(font_path):
-        st.error("Font FE-FONT.TTF not found!")
+        st.error("FE-FONT.TTF not found!")
         return
-
-    from PIL import Image, ImageDraw, ImageFont
 
     font = ImageFont.truetype(font_path, 90)
 
@@ -70,8 +123,8 @@ def generate_templates():
 
         coords = cv2.findNonZero(img)
         if coords is not None:
-            x, y, wc, hc = cv2.boundingRect(coords)
-            img = square_pad_and_resize(img[y:y + hc, x:x + wc])
+            x, y, w, h = cv2.boundingRect(coords)
+            img = square_pad_and_resize(img[y:y+h, x:x+w])
 
         cv2.imwrite(f"templates/{ch}.png", img)
 
@@ -96,53 +149,34 @@ def extract_characters(img, num_chars=7):
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    boxes = [
-        cv2.boundingRect(c)
-        for c in contours
-        if cv2.boundingRect(c)[3] > 15
-    ]
+    boxes = []
+
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        if h > 18 and 5 < w < 200:
+            boxes.append((x, y, w, h))
 
     boxes = sorted(boxes, key=lambda b: b[0])
 
-    merged = []
-    for b in boxes:
-        if not merged:
-            merged.append(b)
-        else:
-            x, y, w, h = b
-            mx, my, mw, mh = merged[-1]
-
-            if x < mx + mw + 5:
-                merged[-1] = (
-                    min(mx, x),
-                    min(my, y),
-                    max(mx + mw, x + w) - min(mx, x),
-                    max(my + mh, y + h) - min(my, y)
-                )
-            else:
-                merged.append(b)
-
-    if len(merged) < num_chars:
+    if len(boxes) < num_chars:
         h_img, w_img = th.shape
         cw = w_img // num_chars
-        merged = [(i * cw, 0, cw, h_img) for i in range(num_chars)]
+        boxes = [(i*cw, 0, cw, h_img) for i in range(num_chars)]
 
-    merged = merged[:num_chars]
+    boxes = boxes[:num_chars]
 
     chars = []
-    for x, y, w, h in merged:
-        char = th[y:y + h, x:x + w]
+    for x, y, w, h in boxes:
+        char = th[y:y+h, x:x+w]
         char = square_pad_and_resize(char)
         chars.append(char)
 
-    return chars, th, merged
+    return chars, th
 
 # =========================
-# CONTOUR POINT EXTRACTION (FIXED)
+# CONTOUR EXTRACTION
 # =========================
 def extract_contour_points(img, num_points=NUM_POINTS):
-    img = np.array(img, dtype=np.uint8)
-
     contours, _ = cv2.findContours(
         img,
         cv2.RETR_EXTERNAL,
@@ -152,77 +186,25 @@ def extract_contour_points(img, num_points=NUM_POINTS):
     if not contours:
         return np.zeros((num_points, 2))
 
-    cnt = max(contours, key=cv2.contourArea)
+    cnt = max(contours, key=cv2.contourArea)[:, 0, :]
 
-    if len(cnt) < num_points:
-        cnt = cv2.convexHull(cnt)
-
-    cnt = cnt[:, 0, :]
-
-    idx = np.linspace(0, len(cnt) - 1, num_points).astype(int)
-
-    return cnt[idx].astype(float)
+    idx = np.linspace(0, len(cnt)-1, num_points).astype(int)
+    return cnt[idx].astype(np.float64)
 
 # =========================
-# NORMALIZATION (FIXED STABILITY)
+# NORMALIZATION
 # =========================
 def normalize_points(pts):
-    pts = np.array(pts, dtype=np.float64)
-
-    pts -= np.mean(pts, axis=0)
-
+    pts = pts - np.mean(pts, axis=0)
     norm = np.linalg.norm(pts)
-    if norm > 1e-9:
-        pts /= norm
-
-    return pts
-
-# =========================
-# LAGRANGE (SAFE VISUAL ONLY)
-# =========================
-def lagrange(x, y, t):
-    n = len(x)
-    result = 0.0
-
-    for i in range(n):
-        term = y[i]
-        for j in range(n):
-            if i != j:
-                denom = x[i] - x[j]
-                if abs(denom) < 1e-9:
-                    continue
-                term *= (t - x[j]) / denom
-        result += term
-
-    return result
-
-# =========================
-# SHAPE MATCHING
-# =========================
-def shape_distance(a, b):
-    return np.mean(np.linalg.norm(a - b, axis=1))
-
-# =========================
-# ORDER POINTS (FIX STRAIGHT LINE BUG)
-# =========================
-def order_points(pts):
-    pts = np.array(pts)
-    center = np.mean(pts, axis=0)
-
-    angles = np.arctan2(
-        pts[:, 1] - center[1],
-        pts[:, 0] - center[0]
-    )
-
-    return pts[np.argsort(angles)]
+    return pts / norm if norm > 1e-9 else pts
 
 # =========================
 # LOAD TEMPLATES
 # =========================
 @st.cache_data
 def load_templates():
-    pts_dict = {}
-    img_dict = {}
+    templates = {}
 
     for f in os.listdir("templates"):
         img = cv2.imread(f"templates/{f}", 0)
@@ -231,22 +213,30 @@ def load_templates():
         pts = extract_contour_points(img)
         pts = normalize_points(pts)
 
-        label = f[0]
+        templates[f[0]] = pts
 
-        pts_dict[label] = pts
-        img_dict[label] = img
-
-    return pts_dict, img_dict
+    return templates
 
 # =========================
-# RECOGNITION
+# DISTANCE
+# =========================
+def curve_distance(a, b):
+    return np.mean(np.linalg.norm(a - b, axis=1))
+
+# =========================
+# RECOGNITION (WITH TRUE LAGRANGE)
 # =========================
 def recognize(pts, templates):
-    best = "?"
-    best_score = 1e9
+    pts = normalize_points(pts)
+
+    # APPLY TRUE LAGRANGE ONLY IF CURVED
+    if is_curved(pts):
+        pts = lagrange_smooth(pts)
+
+    best, best_score = "?", float("inf")
 
     for label, tpl in templates.items():
-        score = shape_distance(pts, tpl)
+        score = curve_distance(pts, tpl)
 
         if score < best_score:
             best_score = score
@@ -257,23 +247,19 @@ def recognize(pts, templates):
 # =========================
 # UI
 # =========================
-
 if mode == "Generate Templates":
     st.title("Template Generator")
 
     if st.button("Generate"):
         generate_templates()
 
-# -------------------------
-# ENCODER (FIXED)
-# -------------------------
 elif mode == "Encode Plate":
     file = st.file_uploader("Upload image")
 
     if file:
         img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), 1)
 
-        chars, th, boxes = extract_characters(img)
+        chars, th = extract_characters(img)
 
         st.image(th)
 
@@ -281,63 +267,24 @@ elif mode == "Encode Plate":
 
         for c in chars:
             pts = extract_contour_points(c)
-            encoded.append({
-                "points": pts.tolist()
-            })
+            encoded.append({"points": pts.tolist()})
 
-        json_data = json.dumps(encoded, indent=2)
+        st.code(json.dumps(encoded, indent=2))
 
-        st.code(json_data)
-
-        st.download_button(
-            "Download JSON",
-            json_data,
-            file_name="encoded.json",
-            mime="application/json"
-        )
-
-# -------------------------
-# DECODER
-# -------------------------
 elif mode == "Decode & Recognize":
-    templates_pts, templates_imgs = load_templates()
+    templates = load_templates()
 
     text = st.text_area("Paste JSON")
 
     if st.button("Recognize") and text.strip():
-
         data = json.loads(text)
 
         result = ""
 
-        for i, ch in enumerate(data):
-
+        for ch in data:
             pts = np.array(ch["points"])
-            pts = normalize_points(pts)
 
-            pts = order_points(pts)
-
-            label = recognize(pts, templates_pts)
-
+            label = recognize(pts, templates)
             result += label
-
-            # SAFE PLOT (NO DISTORTION)
-            center = np.mean(pts, axis=0)
-            angles = np.arctan2(pts[:,1]-center[1], pts[:,0]-center[0])
-            pts = pts[np.argsort(angles)]
-
-            x = pts[:, 0]
-            y = pts[:, 1]
-
-            if len(x) > 5:
-                xi = np.linspace(min(x), max(x), 100)
-                yi = [lagrange(x, y, v) for v in xi]
-
-                fig, ax = plt.subplots()
-                ax.plot(xi, yi)
-                ax.set_title(f"Char {i} → {label}")
-                ax.invert_yaxis()
-
-                st.pyplot(fig)
 
         st.success(f"RESULT: {result}")
